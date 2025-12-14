@@ -1,0 +1,78 @@
+{
+  "embedding_provider_id": {
+    "description": "Embedding 服务提供商",
+    "type": "string",
+    "hint": "选择用于向量嵌入的模型提供商。留空则使用 AstrBot 中配置的第一个 Embedding Provider",
+    "_special": "select_embedding_provider",
+    "default": ""
+  },
+  "rerank_provider_id": {
+    "description": "重排序模型服务商",
+    "type": "string",
+    "hint": "选择用于结果重排序的模型提供商。留空则使用 AstrBot 中配置的第一个 Rerank Provider",
+    "_special": "select_rerank_provider",
+    "default": ""
+  },
+  "file_retention_time": {
+    "title": "文件有效期",
+    "description": "文件嵌入的有效期（分钟）",
+    "type": "int",
+    "default": 60,
+    "minimum": 1,
+    "maximum": 1440
+  },
+  "file_max_rounds": {
+    "title": "文件最大使用轮数",
+    "description": "文件嵌入的最大使用轮数",
+    "type": "int",
+    "default": 5,
+    "minimum": 1,
+    "maximum": 20
+  },
+  "max_file_size": {
+    "title": "最大文件大小",
+    "description": "支持的最大文件大小（MB）",
+    "type": "int",
+    "default": 100,
+    "minimum": 1,
+    "maximum": 500
+  },
+  "chunk_size": {
+    "title": "分块大小",
+    "description": "文件内容分块的大小（token数）",
+    "type": "int",
+    "default": 512,
+    "minimum": 100,
+    "maximum": 4096
+  },
+  "chunk_overlap": {
+    "title": "块重叠大小",
+    "description": "相邻块之间的重叠大小（token数）",
+    "type": "int",
+    "default": 100,
+    "minimum": 0,
+    "maximum": 500
+  },
+  "retrieve_top_k": {
+    "title": "检索返回结果数",
+    "description": "最终检索返回的相关块数量",
+    "type": "int",
+    "default": 5,
+    "minimum": 1,
+    "maximum": 20
+  },
+  "fetch_k": {
+    "title": "重排序前检索数",
+    "description": "重排序前检索的相关块数量",
+    "type": "int",
+    "default": 20,
+    "minimum": 5,
+    "maximum": 100
+  },
+  "enable_rerank": {
+    "title": "启用重排序",
+    "description": "是否启用结果重排序",
+    "type": "bool",
+    "default": true
+  }
+}
