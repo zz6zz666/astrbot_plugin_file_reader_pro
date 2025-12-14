@@ -12,6 +12,7 @@ from pathlib import Path
 import time
 import os
 import asyncio
+import sqlite3
 
 # 导入知识库相关模块
 from astrbot.core.knowledge_base.chunking.recursive import RecursiveCharacterChunker
@@ -366,10 +367,16 @@ class AstrbotPluginFileReaderPro(Star):
         # 当前活跃的会话和对话信息
         self.current_session_id = None
         self.current_conversation_id = None
-        self.current_file_rounds = 0  # 当前文件已使用的轮数
         
         # 向量数据库实例字典，键为(session_id, conversation_id, file_name)
         self.vec_dbs = {}
+        
+        # 定期清理任务相关
+        self._cleanup_task = None
+        self._cleanup_interval = None
+        
+        # 初始化文件使用次数数据库连接
+        self._init_file_rounds_db()
         
         super().__init__(context)
     
@@ -422,6 +429,148 @@ class AstrbotPluginFileReaderPro(Star):
         
         fallback_dir.mkdir(parents=True, exist_ok=True)
         return fallback_dir
+        
+    def _init_file_rounds_db(self):
+        """初始化文件使用次数数据库"""
+        # 数据库文件路径
+        self._db_path = self._data_dir / "file_rounds.db"
+        
+        try:
+            # 保持数据库连接打开以提高性能
+            self._db_conn = sqlite3.connect(self._db_path)
+            cursor = self._db_conn.cursor()
+            
+            # 创建文件使用次数表
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS file_rounds (
+                    session_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    file_name TEXT NOT NULL,
+                    rounds INTEGER DEFAULT 0,
+                    PRIMARY KEY (session_id, conversation_id, file_name)
+                )
+            ''')
+            
+            # 创建索引以提高查询性能
+            cursor.execute('''
+                CREATE INDEX IF NOT EXISTS idx_file_rounds_session_conversation ON file_rounds (session_id, conversation_id)
+            ''')
+            
+            self._db_conn.commit()
+            logger.info(f"文件使用次数数据库初始化成功，路径：{self._db_path}")
+        except Exception as e:
+            logger.error(f"初始化文件使用次数数据库失败: {str(e)}")
+            self._db_conn = None
+            
+    async def _start_periodic_cleanup(self):
+        """启动定期清理任务"""
+        # 从配置获取清理间隔（默认5分钟）
+        cleanup_interval_minutes = self.config.get("cleanup_interval", 5)
+        self._cleanup_interval = cleanup_interval_minutes * 60  # 转换为秒
+        
+        async def cleanup_loop():
+            while True:
+                await asyncio.sleep(self._cleanup_interval)
+                await self._cleanup_expired_files()
+        
+        self._cleanup_task = asyncio.create_task(cleanup_loop())
+        logger.info(f"已启动定期清理任务，间隔：{cleanup_interval_minutes}分钟")
+        
+    async def _stop_periodic_cleanup(self):
+        """停止定期清理任务"""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("已停止定期清理任务")
+            
+    async def _cleanup_expired_files(self):
+        """清理所有过期文件"""
+        logger.info("开始执行定期清理任务")
+        
+        # 遍历所有向量数据库实例
+        keys_to_cleanup = []
+        for (session_id, conversation_id, file_name), vec_db in list(self.vec_dbs.items()):
+            if self._is_file_expired(session_id, conversation_id, file_name):
+                keys_to_cleanup.append((session_id, conversation_id, file_name))
+        
+        # 清理过期文件
+        if keys_to_cleanup:
+            logger.info(f"发现 {len(keys_to_cleanup)} 个过期文件，开始清理")
+            for session_id, conversation_id, file_name in keys_to_cleanup:
+                await self.cleanup(session_id, conversation_id, file_name)
+        else:
+            logger.info("未发现过期文件")
+            
+    def _get_file_rounds(self, session_id: str, conversation_id: str, file_name: str) -> int:
+        """获取文件的使用次数"""
+        if not self._db_conn:
+            return 0
+            
+        try:
+            cursor = self._db_conn.cursor()
+            
+            cursor.execute(
+                "SELECT rounds FROM file_rounds WHERE session_id=? AND conversation_id=? AND file_name=?",
+                (session_id, conversation_id, file_name)
+            )
+            
+            result = cursor.fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"获取文件使用次数失败: {str(e)}")
+            return 0
+            
+    def _increment_file_rounds(self, session_id: str, conversation_id: str, file_name: str):
+        """增加文件的使用次数"""
+        if not self._db_conn:
+            return
+            
+        try:
+            cursor = self._db_conn.cursor()
+            
+            # 使用upsert操作，不存在则插入，存在则更新
+            cursor.execute(
+                "INSERT OR REPLACE INTO file_rounds (session_id, conversation_id, file_name, rounds) VALUES (?, ?, ?, COALESCE((SELECT rounds + 1 FROM file_rounds WHERE session_id=? AND conversation_id=? AND file_name=?), 1))",
+                (session_id, conversation_id, file_name, session_id, conversation_id, file_name)
+            )
+            
+            self._db_conn.commit()
+        except Exception as e:
+            logger.error(f"增加文件使用次数失败: {str(e)}")
+            
+    def _delete_file_rounds(self, session_id: str, conversation_id: str, file_name: str = None):
+        """删除文件的使用次数记录"""
+        if not self._db_conn:
+            return
+            
+        try:
+            cursor = self._db_conn.cursor()
+            
+            if file_name:
+                # 删除特定文件的记录
+                cursor.execute(
+                    "DELETE FROM file_rounds WHERE session_id=? AND conversation_id=? AND file_name=?",
+                    (session_id, conversation_id, file_name)
+                )
+            elif conversation_id:
+                # 删除整个对话的所有文件记录
+                cursor.execute(
+                    "DELETE FROM file_rounds WHERE session_id=? AND conversation_id=?",
+                    (session_id, conversation_id)
+                )
+            elif session_id:
+                # 删除整个会话的所有文件记录
+                cursor.execute(
+                    "DELETE FROM file_rounds WHERE session_id=?",
+                    (session_id,)
+                )
+            
+            self._db_conn.commit()
+        except Exception as e:
+            logger.error(f"删除文件使用次数记录失败: {str(e)}")
     
     def _get_session_id(self, event: AstrMessageEvent) -> str:
         """获取会话ID（统一消息来源）"""
@@ -478,10 +627,10 @@ class AstrbotPluginFileReaderPro(Star):
         
         # 检查轮数是否过期
         max_rounds = self.config.get("file_max_rounds", 5)
-        if self.current_file_rounds >= max_rounds:
-            return True
+        current_rounds = self._get_file_rounds(session_id, conversation_id, file_name)
+        rounds_expired = current_rounds >= max_rounds
         
-        return time_expired
+        return time_expired or rounds_expired
 
     async def initialize(self):
         """初始化嵌入提供者和重排序提供者"""
@@ -537,6 +686,9 @@ class AstrbotPluginFileReaderPro(Star):
                     logger.info(f"使用的重排序提供者: {self.rerank_provider.__class__.__name__}")
                 else:
                     logger.warning("无法获取重排序提供者，将不使用重排序功能")
+                
+                # 启动定期清理任务
+                await self._start_periodic_cleanup()
             except Exception as e:
                 logger.error(f"初始化提供者失败: {str(e)}")
     
@@ -608,6 +760,10 @@ class AstrbotPluginFileReaderPro(Star):
                 
                 # 从字典中移除
                 del self.vec_dbs[key]
+                
+                # 从数据库中删除该文件的使用次数记录
+                self._delete_file_rounds(session_id, conversation_id, file_name)
+                
                 logger.info(f"已清理会话 {session_id} 对话 {conversation_id} 的文件 {file_name} 向量数据库")
         elif conversation_id:
             # 清理整个对话
@@ -630,16 +786,16 @@ class AstrbotPluginFileReaderPro(Star):
             except Exception as e:
                 logger.error(f"清理对话目录失败: {str(e)}")
             
+            # 从数据库中删除该对话的所有文件使用次数记录
+            self._delete_file_rounds(session_id, conversation_id)
+            
             logger.info(f"已清理会话 {session_id} 对话 {conversation_id} 的所有文件")
         else:
             # 清理整个会话
             await self.cleanup_all_session_files(session_id)
-        
-        # 重置当前文件相关状态
-        if session_id == self.current_session_id and conversation_id == self.current_conversation_id:
-            self.current_file_rounds = 0
-            self.content = ""
-            self.file_name = ""
+            
+            # 从数据库中删除该会话的所有文件使用次数记录
+            self._delete_file_rounds(session_id)
         
     async def cleanup_all_session_files(self, session_id):
         """清理指定会话的所有文件"""
@@ -837,9 +993,15 @@ class AstrbotPluginFileReaderPro(Star):
             logger.info("未检索到相关内容")
             req.prompt += f"\n\n(未找到与查询相关的文件内容)"
         
-        # 增加当前文件使用轮数
-        self.current_file_rounds += 1
+        # 遍历当前会话/对话下的所有文件，为每个文件增加使用轮数
+        for (db_session_id, db_conversation_id, db_file_name), _ in list(self.vec_dbs.items()):
+            if db_session_id == current_session_id and db_conversation_id == current_conversation_id:
+                self._increment_file_rounds(db_session_id, db_conversation_id, db_file_name)
 
     def __del__(self):
         """对象销毁时清理资源"""
+        # 停止定期清理任务
+        asyncio.run(self._stop_periodic_cleanup())
+        
+        # 清理资源
         asyncio.run(self.cleanup())

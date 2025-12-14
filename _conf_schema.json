@@ -74,5 +74,13 @@
     "description": "是否启用结果重排序",
     "type": "bool",
     "default": true
+  },
+  "cleanup_interval": {
+    "title": "定期清理间隔",
+    "description": "定期清理过期文件的间隔时间（分钟）",
+    "type": "int",
+    "default": 5,
+    "minimum": 1,
+    "maximum": 1440
   }
 }
