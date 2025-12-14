@@ -9,12 +9,9 @@ from astrbot.api import logger                                  # pyright: ignor
 # 导入配置相关模块
 from astrbot.core.star.config import load_config
 from pathlib import Path
-import json
 import time
-
 import os
-import uuid
-from pathlib import Path
+import asyncio
 
 # 导入知识库相关模块
 from astrbot.core.knowledge_base.chunking.recursive import RecursiveCharacterChunker
@@ -345,7 +342,7 @@ def read_any_file_to_text(file_path: str) -> str:
 
 
 @register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.0.0")
-class astrbot_plugin_file_reader_pro(Star):
+class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
     def __init__(self, context: Context):
@@ -735,7 +732,12 @@ class astrbot_plugin_file_reader_pro(Star):
                         
                         # 读取文件内容
                         content = read_any_file_to_text(file_path)
-                        if content:
+                        
+                        # 检查是否为错误信息
+                        error_prefixes = ["文件不存在:", "不支持 ", "找不到处理 ", "读取文件时出错:"]
+                        is_error = any(content.startswith(prefix) for prefix in error_prefixes)
+                        
+                        if content and not is_error:
                             logger.info(f"读取文件{file_name}内容成功")
                             
                             # 初始化嵌入和重排序提供者
@@ -759,6 +761,9 @@ class astrbot_plugin_file_reader_pro(Star):
                                 logger.info(f"使用带时间戳的数据库名称：{timestamped_db_name}")
 
                                 yield event.plain_result(f"文件：{file_name} 已处理完毕！请随时提问~ 😊")
+                        elif is_error:
+                            logger.warning(f"读取文件{file_name}失败: {content}")
+                            yield event.plain_result(content)  # 返回错误信息给用户
                         else:
                             logger.warning(f"读取文件{file_name}内容为空")
                     except Exception as e:
@@ -835,6 +840,6 @@ class astrbot_plugin_file_reader_pro(Star):
         # 增加当前文件使用轮数
         self.current_file_rounds += 1
 
-    async def __del__(self):
+    def __del__(self):
         """对象销毁时清理资源"""
-        await self.cleanup()
+        asyncio.run(self.cleanup())
