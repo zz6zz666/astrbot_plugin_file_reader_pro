@@ -1,193 +1,149 @@
-# 让 LLM 高效支持文件传入
+# 📄 AstrBot Pro 文件读取插件（File Reader Pro）
 
-## 介绍
+> 基于嵌入模型与向量检索的高效文件内容理解方案
 
-这是一个增强版的AstrBot文件读取插件，基于原先的`astrbot_plugin_file_reader`改进而来。与原版不同，pro版采用了更高效的基于嵌入模型的内容处理方式，替代了直接将文件内容注入prompt的低效方式。
+本插件是 `astrbot_plugin_file_reader` 的增强版，代号 **File Reader Pro**。与传统“直接将文件全文塞入提示词”的做法不同，Pro 版采用现代 RAG（检索增强生成）架构，通过**语义分块 + 向量嵌入 + 智能检索**的方式，实现对文件内容的高效利用，显著降低上下文开销，提升问答准确率。
 
-## 核心特性
+## ✨ 核心优势
 
-### 1. 高效的嵌入模型集成
-- 使用AstrBot内置的`embedding_provider`生成文本向量
-- 替代直接将文件内容注入prompt的低效方式
-- 支持重排序（`RerankProvider`）提升检索准确性
+### 🔍 更智能：基于语义的向量检索
+- 不再粗暴拼接全文内容到 prompt。
+- 使用嵌入模型（`embedding_provider`）将文本转化为高维向量。
+- 通过 FAISS 实现快速近似最近邻搜索，仅返回最相关的片段。
 
-### 2. 智能分块与向量存储
-- **递归字符分块**：`RecursiveCharacterChunker`按语义分割文本
-- **可配置参数**：支持自定义块大小（`chunk_size`）和重叠度（`chunk_overlap`）
-- **高效存储**：基于FAISS的`FaissVecDB`实现向量存储与管理
+### ⚡ 更高效：精准上下文注入
+- 结合重排序模块（`RerankProvider`），进一步优化检索结果相关性。
+- 显著减少 LLM 输入长度，节省 token，加快响应速度。
+- 支持动态控制召回数量（`retrieve_top_k`），灵活平衡性能与精度。
 
-### 3. 多文件共存支持
-- 支持同一对话中上传多个文件
-- 基于`session_id`和`conversation_id`实现文件隔离存储
-- 将在文件有效期内检索当前对话(conversation_id)中上传的文件
+### 🧩 更精细：语义感知的内容分块
+- 采用 `RecursiveCharacterChunker` 进行递归分块，保留上下文连贯性。
+- 可配置：
+  - `chunk_size`：单块最大字符数（默认 512）
+  - `chunk_overlap`：块间重叠长度（默认 100），防止语义断裂
 
-### 4. 智能文件生命周期管理
-- **时间有效期**：默认60分钟，可配置
-- **最大使用轮数**：默认5轮，可配置
-- 任一条件满足即自动清理过期文件
+### 📁 多文件支持 & 对话级隔离
+- 支持在同一个对话中上传多个文件。
+- 所有文件按 `session_id` 和 `conversation_id` 隔离存储与检索。
+- 默认当前对话 `conversation_id` 中的文件会被检索（/new 了之后先前对话的文件不再被被检索了）。
 
-### 5. 用户命令
-- 支持手动文件清理命令：`/clear_file`、`/clean_file`
-- 所有清理命令统一清理当前用户 `session_id` 的所有文件
+### 🕒 智能生命周期管理
+- **时间有效期**：默认 60 分钟，超时自动清理（可配置）
+- **使用轮次限制**：默认最多参与 5 轮对话后清除（防冗余）
+- 任一条件满足即触发清理，资源友好，无需手动干预。
 
-### 6. 灵活的配置选项
-- 通过`_conf_schema.json`提供可配置参数
-- 支持自定义分块大小、文件有效期、最大使用轮数等
-- 支持配置文件大小限制
+### 🗑️ 用户可控：一键清理命令
+支持以下指令清理当前会话中的所有文件数据：
 
-## 安装要求
+> /clear_file  
+> /clean_file  
 
-1. 安装依赖库：
+*清理操作作用于当前用户的 `session_id`，安全可靠。*
+
+## 📎 支持的文件格式
+
+| 类型 | 格式 |
+|------|------|
+| 文档 | `.pdf`, `.docx`, `.doc`, `.rtf`, `.odt` |
+| 表格 | `.xlsx`, `.xls`, `.ods`, `.csv` |
+| 演示文稿 | `.pptx`, `.ppt`, `.odp` |
+| 源码 | `.py`, `.java`, `.cpp`, `.js`, `.ts`, `.go`, `.rs`, `.sh`, `.bat`, `.ps1` 等常见编程语言 |
+| 标记语言 | `.md`, `.html`, `.xml`, `.json`, `.yaml`, `.yml` |
+| 配置/日志 | `.txt`, `.log`, `.ini`, `.cfg`, `.env`, `.properties`, `.toml`, `.gitignore` |
+| 其他 | `.sql`, `.url`, `.webloc`, 无扩展名文本文件 |
+
+> 所有文件均调用专用解析器提取纯文本内容，确保结构化信息不失真。
+
+## ⚙️ 配置选项（可通过 `_conf_schema.json` 自定义）
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `embedding_provider_id` | 第一个可用提供商 | 嵌入模型服务 ID |
+| `rerank_provider_id` | 第一个可用提供商 | 重排序模型服务 ID |
+| `file_retention_time` | `60` | 文件有效时间（分钟） |
+| `file_max_rounds` | `5` | 最大使用轮数 |
+| `max_file_size` | `100` | 单文件上限（MB） |
+| `chunk_size` | `512` | 分块大小（字符数） |
+| `chunk_overlap` | `100` | 块间重叠大小 |
+| `retrieve_top_k` | `5` | 最终返回的相关块数量 |
+| `fetch_k` | `20` | 重排序前初检数量 |
+| `enable_rerank` | `true` | 是否启用结果重排序 |
+
+
+
+## 🛠️ 安装与使用
+
+### 安装依赖
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Linux用户可能需要安装`libmagic`：
-```bash
-sudo apt-get install libmagic1
+> **Linux 用户注意**：若遇到文件类型识别问题，请安装 `libmagic`：
+> ```bash
+> sudo apt-get install libmagic1
+> ```
+
+### 使用方法
+
+1. **上传文件**
+   在 AstrBot 中直接发送文件即可，系统将自动完成：
+   - 解析 → 分块 → 向量化 → 存储
+
+2. **提问**
+   直接询问关于文件内容的问题，例如：
+   > “总结一下这个 PDF 的主要观点。”  
+   > “这份代码里有没有调用外部 API？”
+
+   插件会自动检索最相关内容并注入上下文。
+
+3. **清理**
+   使用 `/clear_file` 或 `/clean_file` 清除当前会话的所有文件缓存。
+
+## 🔬 技术原理简述
+
+处理流程如下：
+
+```
+[文件] 
+   ↓ 解析（read_xxx_to_text）
+[纯文本]
+   ↓ 递归分块（RecursiveCharacterChunker）
+[文本块列表]
+   ↓ 向量化（embedding_provider）
+[向量表示]
+   ↓ 存入 FAISS 向量库（FaissVecDB）
+[可检索知识库]
+   ↓ 查询时：相似度检索 + (可选) 重排序
+[Top-K 相关段落]
+   ↓ 注入 Prompt
+[LLM 接收精炼上下文]
 ```
 
-## 使用方法
+> ✅ 实现了从“全文硬塞”到“按需调用”的范式升级。
 
-### 1. 上传文件
-- 在AstrBot中直接上传文件
-- 支持多种文件格式（见下方支持列表）
-- 上传后文件会自动进行分块和嵌入处理
+## 📝 注意事项
 
-### 2. 查询文件内容
-- 上传文件后，直接提问关于文件内容的问题
-- 插件会自动检索相关内容并添加到prompt中
+- 文件处理涉及计算资源消耗，请根据部署环境合理设置 `chunk_size` 和 `max_file_size`。
+- 切换对话不会立即删除文件，仍可在有效期内返回继续使用。
+- 过期文件将被后台自动回收，无需用户操心。
 
-### 3. 清理文件
-支持以下清理命令，所有命令都会清理当前用户的所有文件：
-- `/clear_file`
-- `/clean_file`
+## 📦 版本历史
 
-## 支持的文件格式
+### v2.0.0（当前）
+- 引入向量化处理机制，告别全文注入
+- 实现智能分块与 FAISS 向量存储
+- 支持多文件共存与对话隔离
+- 新增灵活配置项与标准清理命令
+- 重构生命周期管理逻辑
 
-```python
-SUPPORTED_EXTENSIONS: Dict[str, str] = {
-    # 文档格式
-    "pdf": "read_pdf_to_text",
-    "docx": "read_docx_to_text",
-    "doc": "read_docx_to_text",
-    "rtf": "read_txt_to_text",
-    "odt": "read_txt_to_text",
+### v1.x.x
+- 初始版本，基于 `get_file()` 实现基础文件读取
+- 支持多种格式解析
 
-    # 电子表格
-    "xlsx": "read_excel_to_text",
-    "xls": "read_excel_to_text",
-    "ods": "read_excel_to_text",
-    "csv": "read_csv_to_text",
+---
 
-    # 演示文稿
-    "pptx": "read_pptx_to_text",
-    "ppt": "read_pptx_to_text",
-    "odp": "read_pptx_to_text",
+> 💡 **提示**：如果你正在构建一个需要处理大量文档的 AI 助手，这个插件正是为“轻负担、高效率、强语义”而生。
 
-    # 编程语言源代码
-    "py": "read_txt_to_text",
-    "java": "read_txt_to_text",
-    "cpp": "read_txt_to_text",
-    "c": "read_txt_to_text",
-    "h": "read_txt_to_text",
-    "hpp": "read_txt_to_text",
-    "cs": "read_txt_to_text",
-    "js": "read_txt_to_text",
-    "ts": "read_txt_to_text",
-    "php": "read_txt_to_text",
-    "rb": "read_txt_to_text",
-    "go": "read_txt_to_text",
-    "rs": "read_txt_to_text",
-    "swift": "read_txt_to_text",
-    "kt": "read_txt_to_text",
-    "scala": "read_txt_to_text",
-    "sh": "read_txt_to_text",
-    "bash": "read_txt_to_text",
-    "ps1": "read_txt_to_text",
-    "bat": "read_txt_to_text",
-    "cmd": "read_txt_to_text",
-    "vbs": "read_txt_to_text",
+---
 
-    # 标记语言
-    "html": "read_txt_to_text",
-    "htm": "read_txt_to_text",
-    "xml": "read_txt_to_text",
-    "json": "read_txt_to_text",
-    "yaml": "read_txt_to_text",
-    "yml": "read_txt_to_text",
-    "md": "read_txt_to_text",
-    "markdown": "read_txt_to_text",
-
-    # 配置文件
-    "ini": "read_txt_to_text",
-    "cfg": "read_txt_to_text",
-    "conf": "read_txt_to_text",
-    "properties": "read_txt_to_text",
-    "env": "read_txt_to_text",
-
-    # 数据库/查询
-    "sql": "read_txt_to_text",
-
-    # 其他文本格式
-    "txt": "read_txt_to_text",
-    "log": "read_txt_to_text",
-    "": "read_txt_to_text",  # 无扩展名文件
-
-    # 构建/项目文件
-    "toml": "read_txt_to_text",
-    "lock": "read_txt_to_text",
-    "gitignore": "read_txt_to_text",
-
-    # 网络相关
-    "url": "read_txt_to_text",
-    "webloc": "read_txt_to_text",
-}
-```
-
-## 配置说明
-
-插件支持通过`_conf_schema.json`配置以下参数：
-
-- `chunk_size`: 文件内容分块大小（默认512）
-- `chunk_overlap`: 相邻块之间的重叠大小（默认100）
-- `retrieve_top_k`: 最终检索返回的相关块数量（默认5）
-- `fetch_k`: 重排序前检索的相关块数量（默认20）
-- `enable_rerank`: 是否启用结果重排序（默认true）
-- `file_retention_time`: 文件嵌入的有效期（分钟，默认60）
-- `file_max_rounds`: 文件嵌入的最大使用轮数（默认5）
-- `max_file_size`: 支持的最大文件大小（MB，默认100）
-- `embedding_provider_id`: 嵌入服务提供商ID（默认使用AstrBot配置的第一个嵌入提供商）
-- `rerank_provider_id`: 重排序模型提供商ID（默认使用AstrBot配置的第一个重排序提供商）
-
-## 版本历史
-
-### v2.0.0
-- 新增基于嵌入模型的内容处理方式
-- 实现智能分块与向量存储
-- 支持多文件共存
-- 提供灵活的配置选项
-- 实现标准用户命令
-- 改进文件生命周期管理
-
-### v1.0.2
-- 使用了get_file()
-
-### v1.0.1
-- 支持更多文件后缀名
-
-## 技术原理
-
-处理流程：
-1. **文件解析**：读取并解析各种格式的文件
-2. **智能分块**：使用`RecursiveCharacterChunker`按语义分割文本
-3. **生成嵌入**：通过`embedding_provider`生成文本向量
-4. **向量存储**：将向量存储到`FaissVecDB`中
-5. **高效检索**：基于向量相似度检索相关内容
-6. **上下文组装**：将检索结果组装为上下文添加到prompt中
-
-## 注意事项
-
-- 文件处理会消耗一定的计算资源，请合理配置分块大小和文件大小限制
-- 过期文件会自动清理，无需手动干预
-- 切换对话时文件会暂时失效，但不会立即清理，用户可以随时切换回来使用
+*如需进一步定制（如更换向量数据库、集成特定 embedding 模型），欢迎提交 Issue 或联系维护者。*

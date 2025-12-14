@@ -1,5 +1,6 @@
 name: astrbot_plugin_file_reader_pro
-desc: 一个将文件内容高效传给llm的插件
+display_name: 文件读取插件（File Reader Pro）
+desc: 读取各类文件内容的同时，采用现代 RAG（检索增强生成）架构，通过【语义分块 + 向量嵌入 + 智能检索】的方式，实现对文件内容的高效利用
 version: v2.0.0
 author: zz6zz666
 repo: https://github.com/zz6zz666/astrbot_plugin_file_reader_pro
