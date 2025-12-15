@@ -342,7 +342,7 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.4.2")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "3.0.0")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
@@ -372,7 +372,7 @@ class AstrbotPluginFileReaderPro(Star):
         self.enable_group_file_processing = self.config.get("enable_group_file_processing", True)  # 是否启用群文件处理
         self.enabled_groups = self.config.get("enabled_groups", [])  # 启用的群列表
         self.injection_type = self.config.get("injection_type", "system")  # 文件内容注入类型
-        self.system_context_keep_rounds = self.config.get("system_context_keep_rounds", 2)  # 系统上下文保留轮数
+        self.system_context_keep_rounds = self.config.get("system_context_keep_rounds", 2) # 系统上下文保留轮数
         
         # 初始化数据目录
         self._base_dir = Path(__file__).resolve().parent
@@ -1105,14 +1105,64 @@ class AstrbotPluginFileReaderPro(Star):
             
             # 根据配置选择注入方式
             if self.injection_type == "system":
-                # 清理系统上下文，只保留最近的指定轮数
+                # 清理系统上下文，保留最后N-1轮的system字段
+                # 因为当前请求也会算作一轮，所以实际保留的是N-1轮
                 if self.system_context_keep_rounds > 0:
-                    # 计算需要保留的上下文数量（当前配置轮数 - 1，因为即将添加新的一轮）
-                    keep_count = self.system_context_keep_rounds - 1
-                    # 只保留最近的 keep_count 个系统上下文
-                    if len(req.contexts) > keep_count:
-                        req.contexts = req.contexts[-keep_count:]
-                        logger.debug(f"已清理系统上下文，保留最近的 {keep_count} 个")
+                    # 如果keep_rounds=1，清理所有system消息
+                    if self.system_context_keep_rounds == 1:
+                        # 清理所有system消息
+                        new_contexts = [ctx for ctx in contexts if ctx.get("role") != "system"]
+                        req.contexts = new_contexts
+                        logger.debug(f"已清理所有系统上下文，保留最近 {self.system_context_keep_rounds-1} 轮的完整内容")
+                    else:
+                        # 简化的清理逻辑：找到倒数第keep_rounds轮的结束位置，清除之前的所有system消息
+                        # keep_rounds=2时找倒数第2轮的结束位置，keep_rounds=3时找倒数第3轮的结束位置，以此类推
+                        contexts = req.contexts
+                        new_contexts = []
+                        
+                        # 从后往前找，找到倒数第keep_rounds轮的结束位置（assistant）
+                        cutoff_index = -1  # 默认不清除任何system消息
+                        i = len(contexts) - 1
+                        rounds_found = 0
+                        
+                        while i >= 0 and rounds_found < self.system_context_keep_rounds:
+                            # 找到当前轮次的最后一个assistant
+                            while i >= 0 and contexts[i].get("role") != "assistant":
+                                i -= 1
+                            
+                            if i < 0:
+                                break
+                                
+                            # 找到了一个assistant，这是一个轮次的结束
+                            rounds_found += 1
+                            
+                            # 如果这是我们需要找的轮次（倒数第keep_rounds轮），记录其位置
+                            if rounds_found == self.system_context_keep_rounds:
+                                cutoff_index = i
+                                break
+                            
+                            # 继续往前找下一个轮次
+                            # 跳过当前轮次的所有内容，直到找到上一个轮次的user或system
+                            while i >= 0 and contexts[i].get("role") not in ["user", "system"]:
+                                i -= 1
+                            
+                            # 跳过这个user或system
+                            if i >= 0:
+                                i -= 1
+                        
+                        # 遍历所有上下文，决定是否保留
+                        for i, ctx in enumerate(contexts):
+                            role = ctx.get("role")
+                            
+                            # 如果是system消息且在cutoff_index之前，则清除
+                            if role == "system" and i <= cutoff_index:
+                                continue  # 跳过这个system消息
+                            else:
+                                new_contexts.append(ctx)
+                        
+                        # 更新上下文
+                        req.contexts = new_contexts
+                        logger.debug(f"已清理系统上下文，保留最近 {self.system_context_keep_rounds-1} 轮的完整内容")
                 
                 # 将文件内容注入到系统上下文
                 system_prompt = f"文件相关内容:\n{context_text}\n\n请根据上述内容回答用户问题:"
