@@ -8,7 +8,6 @@ from astrbot.api.all import *                                   # pyright: ignor
 from astrbot.api import logger                                  # pyright: ignore[reportMissingImports]
 
 # 导入配置相关模块
-from astrbot.core.star.config import load_config
 from pathlib import Path
 import time
 import os
@@ -343,18 +342,19 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.4.0")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.4.2")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config):
+        super().__init__(context)
         self.file_name = ""
         self.file_dir = ""
         self.content = ""
         self.embedding_provider = None
         self.rerank_provider = None
         self.file_upload_time = None  # 文件上传时间
-        self.config = self._load_config()  # 加载配置
+        self.config = self._load_config(config)  # 加载配置
         
         # 初始化所有配置项为类属性
         self.chunk_size = self.config.get("chunk_size", 512)
@@ -394,14 +394,10 @@ class AstrbotPluginFileReaderPro(Star):
         
         # 初始化文件使用次数数据库连接
         self._init_file_rounds_db()
-        
-        super().__init__(context)
     
-    def _load_config(self):
+    def _load_config(self, config=None):
         """加载插件配置"""
-        # 从AstrBot配置系统加载配置
-        config = load_config("astrbot_plugin_file_reader_pro")
-        
+        # 使用框架传入的配置
         if not config:
             # 如果配置不存在，使用默认值
             config = {}
