@@ -37,6 +37,22 @@
     "minimum": 1,
     "maximum": 500
   },
+  "injection_type": {
+    "title": "注入类型",
+    "description": "控制文件内容的注入方式",
+    "type": "string",
+    "hint": "选择将文件内容注入到用户prompt中还是系统context中",
+    "options": ["user", "system"],
+    "default": "user"
+  },
+  "system_context_keep_rounds": {
+    "title": "检索内容上下文携带轮数",
+    "description": "控制文件内容在system提示词在上下文中的携带轮数（仅system注入有效）",
+    "type": "int",
+    "hint": "设置为0表示不清洗，1表示保留表示仅当前轮请求的检索结果",
+    "default": 2,
+    "minimum": 0
+  },
   "chunk_size": {
     "title": "分块大小",
     "description": "文件内容分块的大小（token数）",

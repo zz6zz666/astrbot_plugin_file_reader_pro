@@ -343,7 +343,7 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.1.0")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.2.0")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
@@ -371,6 +371,8 @@ class AstrbotPluginFileReaderPro(Star):
         self.cleanup_interval = self.config.get("cleanup_interval", 15)  # 清理间隔（分钟）
         self.enable_group_file_processing = self.config.get("enable_group_file_processing", True)  # 是否启用群文件处理
         self.enabled_groups = self.config.get("enabled_groups", [])  # 启用的群列表
+        self.injection_type = self.config.get("injection_type", "user")  # 文件内容注入类型
+        self.system_context_keep_rounds = self.config.get("system_context_keep_rounds", 2)  # 系统上下文保留轮数
         
         # 初始化数据目录
         self._base_dir = Path(__file__).resolve().parent
@@ -993,7 +995,7 @@ class AstrbotPluginFileReaderPro(Star):
                     except Exception as e:
                         logger.error(f"读取文件失败: {str(e)}")
 
-    @filter.on_llm_request()
+    @filter.on_llm_request(proirity=-9999)
     async def on_request(self, event: AstrMessageEvent, req: ProviderRequest):
         # 获取当前会话和对话ID
         current_session_id = self._get_session_id(event)
@@ -1055,11 +1057,29 @@ class AstrbotPluginFileReaderPro(Star):
                     chunk = result.data.get("text", "")
                     context_text += f"\n【文件: {file_name} 片段{i}】\n{chunk}\n"
             
-            # 将上下文添加到请求中
-            req.prompt = f"用户查询: {user_query}\n\n文件相关内容:\n{context_text}\n\n请根据上述内容回答用户问题:"
+            # 根据配置选择注入方式
+            if self.injection_type == "system":
+                # 清理系统上下文，只保留最近的指定轮数
+                if self.system_context_keep_rounds > 0:
+                    # 计算需要保留的上下文数量（当前配置轮数 - 1，因为即将添加新的一轮）
+                    keep_count = self.system_context_keep_rounds - 1
+                    # 只保留最近的 keep_count 个系统上下文
+                    if len(req.contexts) > keep_count:
+                        req.contexts = req.contexts[-keep_count:]
+                        logger.debug(f"已清理系统上下文，保留最近的 {keep_count} 个")
+                
+                # 将文件内容注入到系统上下文
+                system_prompt = f"文件相关内容:\n{context_text}\n\n请根据上述内容回答用户问题:"
+                req.contexts.append({"role": "system", "content": system_prompt})
+                # 保持原始用户查询作为prompt
+                req.prompt = user_query
+                logger.info(f"已将文件内容以system类型注入到请求中")
+            else:
+                # 将文件内容注入到用户prompt中（默认行为）
+                req.prompt = f"{user_query}\n\n文件相关内容:\n{context_text}\n\n请根据上述内容回答用户问题:"
+                logger.info(f"已将文件内容以user类型注入到请求中")
         elif all_files:
             logger.info("未检索到相关内容")
-            req.prompt += f"\n\n(未找到与查询相关的文件内容)"
         
         # 遍历当前会话/对话下的所有文件，为每个文件增加使用轮数
         for (db_session_id, db_conversation_id, db_file_name), _ in list(self.vec_dbs.items()):
