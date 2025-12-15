@@ -342,7 +342,7 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "3.0.0")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "3.1.0")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
@@ -1115,40 +1115,36 @@ class AstrbotPluginFileReaderPro(Star):
                         req.contexts = new_contexts
                         logger.debug(f"已清理所有系统上下文，保留最近 {self.system_context_keep_rounds-1} 轮的完整内容")
                     else:
-                        # 简化的清理逻辑：找到倒数第keep_rounds轮的结束位置，清除之前的所有system消息
+                        # 使用简化逻辑：找到所有轮次的结束位置，清除之前的所有system消息
                         # keep_rounds=2时找倒数第2轮的结束位置，keep_rounds=3时找倒数第3轮的结束位置，以此类推
                         contexts = req.contexts
                         new_contexts = []
                         
-                        # 从后往前找，找到倒数第keep_rounds轮的结束位置（assistant）
-                        cutoff_index = -1  # 默认不清除任何system消息
-                        i = len(contexts) - 1
-                        rounds_found = 0
+                        # 使用简单逻辑找到所有轮次的结束位置：当上一条是a而下一条是u/s即意味着轮的分割
+                        round_ends = []
                         
-                        while i >= 0 and rounds_found < self.system_context_keep_rounds:
-                            # 找到当前轮次的最后一个assistant
-                            while i >= 0 and contexts[i].get("role") != "assistant":
-                                i -= 1
+                        # 遍历所有消息，找到a->u/s的转换点
+                        for i in range(len(contexts) - 1):
+                            current_role = contexts[i].get("role")
+                            next_role = contexts[i + 1].get("role")
                             
-                            if i < 0:
-                                break
-                                
-                            # 找到了一个assistant，这是一个轮次的结束
-                            rounds_found += 1
-                            
-                            # 如果这是我们需要找的轮次（倒数第keep_rounds轮），记录其位置
-                            if rounds_found == self.system_context_keep_rounds:
-                                cutoff_index = i
-                                break
-                            
-                            # 继续往前找下一个轮次
-                            # 跳过当前轮次的所有内容，直到找到上一个轮次的user或system
-                            while i >= 0 and contexts[i].get("role") not in ["user", "system"]:
-                                i -= 1
-                            
-                            # 跳过这个user或system
-                            if i >= 0:
-                                i -= 1
+                            # 如果当前是assistant，下一个是user或system，则当前assistant是轮次结束
+                            if current_role == "assistant" and next_role in ["user", "system"]:
+                                round_ends.append(i)
+                        
+                        # 处理最后一个消息：如果最后一个是assistant，它也是一个轮次的结束
+                        if contexts and contexts[-1].get("role") == "assistant":
+                            round_ends.append(len(contexts) - 1)
+                        
+                        # 找到cutoff_index
+                        cutoff_index = -1  # 默认不清除任何system消息
+                        if self.system_context_keep_rounds > 0 and round_ends:
+                            # 如果轮次数量不足，返回第一个轮次结束位置
+                            if len(round_ends) < self.system_context_keep_rounds:
+                                cutoff_index = round_ends[0]
+                            else:
+                                # 返回倒数第system_context_keep_rounds轮的结束位置
+                                cutoff_index = round_ends[-self.system_context_keep_rounds]
                         
                         # 遍历所有上下文，决定是否保留
                         for i, ctx in enumerate(contexts):
