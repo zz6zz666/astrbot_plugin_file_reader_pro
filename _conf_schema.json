@@ -79,8 +79,22 @@
     "title": "定期清理间隔",
     "description": "定期清理过期文件的间隔时间（分钟）",
     "type": "int",
-    "default": 5,
+    "default": 15,
     "minimum": 1,
     "maximum": 1440
+  },
+  "enable_group_file_processing": {
+    "title": "启用群聊文件处理",
+    "description": "是否处理群聊中的文件",
+    "type": "bool",
+    "default": true
+  },
+  "enabled_groups": {
+    "description": "群聊白名单",
+    "type": "list",
+    "hint": "允许处理文件的群聊ID列表，为空时允许所有群聊（需要先启用群聊文件处理）",
+    "items": {
+      "type": "string"
+    }
   }
 }

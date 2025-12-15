@@ -2,6 +2,7 @@
 from astrbot.api.star import Context, Star, register            # pyright: ignore[reportMissingImports]
 from astrbot.api.provider import ProviderRequest                # pyright: ignore[reportMissingImports]
 from astrbot.core.provider.provider import RerankProvider        # pyright: ignore[reportMissingImports]
+from astrbot.api.platform import MessageType                    # pyright: ignore[reportMissingImports]
 import astrbot.api.message_components as Comp                   # pyright: ignore[reportMissingImports] 
 from astrbot.api.all import *                                   # pyright: ignore[reportMissingImports] 
 from astrbot.api import logger                                  # pyright: ignore[reportMissingImports]
@@ -342,7 +343,7 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.0.0")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.1.0")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
@@ -355,14 +356,28 @@ class AstrbotPluginFileReaderPro(Star):
         self.file_upload_time = None  # 文件上传时间
         self.config = self._load_config()  # 加载配置
         
+        # 初始化所有配置项为类属性
+        self.chunk_size = self.config.get("chunk_size", 512)
+        self.chunk_overlap = self.config.get("chunk_overlap", 100)
+        self.retrieve_top_k = self.config.get("retrieve_top_k", 5)
+        self.fetch_k = self.config.get("fetch_k", 20)
+        self.enable_rerank = self.config.get("enable_rerank", True)
+        self.file_retention_time = self.config.get("file_retention_time", 60)  # 60分钟
+        self.max_file_size = self.config.get("max_file_size", 100)  # 100MB
+        self.file_max_rounds = self.config.get("file_max_rounds", 5)  # 文件最大使用轮数
+        self.supported_file_types = self.config.get("supported_file_types", list(SUPPORTED_EXTENSIONS.keys()))
+        self.rerank_provider_id = self.config.get("rerank_provider_id", "")  # 重排序模型服务商
+        self.embedding_provider_id = self.config.get("embedding_provider_id", "")  # Embedding服务提供商
+        self.cleanup_interval = self.config.get("cleanup_interval", 15)  # 清理间隔（分钟）
+        self.enable_group_file_processing = self.config.get("enable_group_file_processing", True)  # 是否启用群文件处理
+        self.enabled_groups = self.config.get("enabled_groups", [])  # 启用的群列表
+        
         # 初始化数据目录
         self._base_dir = Path(__file__).resolve().parent
         self._data_dir = self._resolve_data_dir()
         
         # 使用配置初始化分块器
-        chunk_size = self.config.get("chunk_size", 512)
-        chunk_overlap = self.config.get("chunk_overlap", 100)
-        self.chunker = RecursiveCharacterChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+        self.chunker = RecursiveCharacterChunker(chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
         
         # 当前活跃的会话和对话信息
         self.current_session_id = None
@@ -464,17 +479,16 @@ class AstrbotPluginFileReaderPro(Star):
             
     async def _start_periodic_cleanup(self):
         """启动定期清理任务"""
-        # 从配置获取清理间隔（默认5分钟）
-        cleanup_interval_minutes = self.config.get("cleanup_interval", 5)
-        self._cleanup_interval = cleanup_interval_minutes * 60  # 转换为秒
+        # 使用类属性获取清理间隔
+        cleanup_interval_seconds = self.cleanup_interval * 60  # 转换为秒
         
         async def cleanup_loop():
             while True:
-                await asyncio.sleep(self._cleanup_interval)
+                await asyncio.sleep(cleanup_interval_seconds)
                 await self._cleanup_expired_files()
         
         self._cleanup_task = asyncio.create_task(cleanup_loop())
-        logger.info(f"已启动定期清理任务，间隔：{cleanup_interval_minutes}分钟")
+        logger.info(f"已启动定期清理任务，间隔：{self.cleanup_interval}分钟")
         
     async def _stop_periodic_cleanup(self):
         """停止定期清理任务"""
@@ -621,12 +635,12 @@ class AstrbotPluginFileReaderPro(Star):
             return True
         
         # 检查时间是否过期
-        retention_time = self.config.get("file_retention_time", 60) * 60  # 转换为秒
+        retention_time = self.file_retention_time * 60  # 转换为秒
         current_time = time.time()
         time_expired = (current_time - upload_time) > retention_time
         
         # 检查轮数是否过期
-        max_rounds = self.config.get("file_max_rounds", 5)
+        max_rounds = self.file_max_rounds
         current_rounds = self._get_file_rounds(session_id, conversation_id, file_name)
         rounds_expired = current_rounds >= max_rounds
         
@@ -634,63 +648,68 @@ class AstrbotPluginFileReaderPro(Star):
 
     async def initialize(self):
         """初始化嵌入提供者和重排序提供者"""
-        if not self.embedding_provider:
-            try:
-                # 从配置中获取嵌入提供者ID
-                embedding_provider_id = self.config.get("embedding_provider_id", "")
+        try:
+            # 首先重置提供者状态，确保每次初始化都是全新尝试
+            self.embedding_provider = None
+            self.rerank_provider = None
+            
+            # 使用类属性获取嵌入提供者ID
+            embedding_provider_id = self.embedding_provider_id
+            
+            # 如果配置了特定的嵌入提供者ID，使用该提供者
+            if embedding_provider_id:
+                self.embedding_provider = self.context.get_provider_by_id(embedding_provider_id)
+                logger.info(f"使用配置的嵌入提供者: {embedding_provider_id}")
+            
+            # 如果没有配置或者获取失败，使用默认的嵌入提供者
+            if not self.embedding_provider:
+                embedding_providers = self.context.get_all_embedding_providers()
+                for provider in embedding_providers:
+                    if hasattr(provider, 'get_embedding') and not self.embedding_provider:
+                        self.embedding_provider = provider
+                        break
+            
+            # 使用类属性获取重排序提供者ID
+            rerank_provider_id = self.rerank_provider_id
+            
+            # 如果配置了特定的重排序提供者ID，使用该提供者
+            if rerank_provider_id:
+                self.rerank_provider = self.context.get_provider_by_id(rerank_provider_id)
+                logger.info(f"使用配置的重排序提供者: {rerank_provider_id}")
+            
+            # 如果没有配置或者获取失败，使用默认的重排序提供者
+            if not self.rerank_provider:
+                # 直接从provider_manager获取所有重排序提供者
+                rerank_providers = self.context.provider_manager.rerank_provider_insts
+                for provider in rerank_providers:
+                    if hasattr(provider, 'rerank') and not self.rerank_provider:
+                        self.rerank_provider = provider
+                        break
                 
-                # 如果配置了特定的嵌入提供者ID，使用该提供者
-                if embedding_provider_id:
-                    self.embedding_provider = self.context.get_provider_by_id(embedding_provider_id)
-                    logger.info(f"使用配置的嵌入提供者: {embedding_provider_id}")
-                
-                # 如果没有配置或者获取失败，使用默认的嵌入提供者
-                if not self.embedding_provider:
-                    embedding_providers = self.context.get_all_embedding_providers()
-                    for provider in embedding_providers:
-                        if hasattr(provider, 'get_embedding') and not self.embedding_provider:
-                            self.embedding_provider = provider
-                            break
-                
-                # 从配置中获取重排序提供者ID
-                rerank_provider_id = self.config.get("rerank_provider_id", "")
-                
-                # 如果配置了特定的重排序提供者ID，使用该提供者
-                if rerank_provider_id:
-                    self.rerank_provider = self.context.get_provider_by_id(rerank_provider_id)
-                    logger.info(f"使用配置的重排序提供者: {rerank_provider_id}")
-                
-                # 如果没有配置或者获取失败，使用默认的重排序提供者
+                # 如果直接访问provider_manager失败，尝试从所有提供者中过滤
                 if not self.rerank_provider:
-                    # 直接从provider_manager获取所有重排序提供者
-                    rerank_providers = self.context.provider_manager.rerank_provider_insts
-                    for provider in rerank_providers:
-                        if hasattr(provider, 'rerank') and not self.rerank_provider:
+                    all_providers = self.context.provider_manager.inst_map.values()
+                    for provider in all_providers:
+                        if isinstance(provider, RerankProvider) and hasattr(provider, 'rerank') and not self.rerank_provider:
                             self.rerank_provider = provider
                             break
-                    
-                    # 如果直接访问provider_manager失败，尝试从所有提供者中过滤
-                    if not self.rerank_provider:
-                        all_providers = self.context.provider_manager.inst_map.values()
-                        for provider in all_providers:
-                            if isinstance(provider, RerankProvider) and hasattr(provider, 'rerank') and not self.rerank_provider:
-                                self.rerank_provider = provider
-                                break
-                
-                if not self.embedding_provider:
-                    logger.error("无法获取嵌入提供者")
-                    return
-                
-                logger.info(f"使用的嵌入提供者: {self.embedding_provider.__class__.__name__}")
-                if self.rerank_provider:
-                    logger.info(f"使用的重排序提供者: {self.rerank_provider.__class__.__name__}")
-                else:
-                    logger.warning("无法获取重排序提供者，将不使用重排序功能")
-                
-                # 启动定期清理任务
-                await self._start_periodic_cleanup()
-            except Exception as e:
-                logger.error(f"初始化提供者失败: {str(e)}")
+            
+            if not self.embedding_provider:
+                logger.error("无法获取嵌入提供者")
+                return False
+            
+            logger.info(f"使用的嵌入提供者: {self.embedding_provider.__class__.__name__}")
+            if self.rerank_provider:
+                logger.info(f"使用的重排序提供者: {self.rerank_provider.__class__.__name__}")
+            else:
+                logger.warning("无法获取重排序提供者，将不使用重排序功能")
+            
+            # 启动定期清理任务
+            await self._start_periodic_cleanup()
+            return True
+        except Exception as e:
+            logger.error(f"初始化提供者失败: {str(e)}")
+            return False
     
     async def get_or_create_vector_db(self, session_id: str, conversation_id: str, file_name: str):
         """获取或创建向量数据库（按会话、对话和文件名隔离）"""
@@ -840,17 +859,36 @@ class AstrbotPluginFileReaderPro(Star):
         self.file_upload_time = None
         yield event.plain_result(f"已清理当前用户的所有文件，可以上传新文件了😊")
 
-    @event_message_type(EventMessageType.ALL)               # type: ignore
+    @filter.event_message_type(filter.EventMessageType.ALL)               # type: ignore
     async def on_receive_msg(self, event: AstrMessageEvent):
         """当获取到有文件时"""
-        if event.is_at_or_wake_command:# 如果是被唤醒的状态，即：先被at一下后发送
+        # 检查是否有新文件上传
+        has_file = False
+        for item in event.message_obj.message:
+            if isinstance(item, Comp.File):
+                has_file = True
+                break
+        
+        # 只有当有文件时才处理
+        if has_file:
+            # 检查是否为群聊消息
+            is_group_message = event.get_message_type() == MessageType.GROUP_MESSAGE
+            
+            # 如果是群聊消息，检查是否启用群聊文件处理
+            if is_group_message and not self.enable_group_file_processing:
+                logger.info(f"群聊文件处理已禁用，忽略来自会话 {self.current_session_id} 的文件")
+                return
                 
-            # 检查是否有新文件上传
-            has_file = False
-            for item in event.message_obj.message:
-                if isinstance(item, Comp.File):
-                    has_file = True
-                    break
+            # 如果是群聊消息，检查是否在白名单中
+            if is_group_message:
+                # 获取群聊ID
+                group_id = event.get_group_id()
+                
+                # 检查群聊白名单
+                # 参考llm_poke插件，确保所有ID都转为字符串比较
+                if self.enabled_groups and group_id and str(group_id) not in [str(g) for g in self.enabled_groups]:
+                    logger.info(f"群聊 {group_id} 不在白名单中，忽略文件处理")
+                    return
             
             # 获取会话ID和对话ID
             self.current_session_id = self._get_session_id(event)
@@ -866,19 +904,18 @@ class AstrbotPluginFileReaderPro(Star):
                         file_name = os.path.basename(raw_file_name)
                         
                         # 检查文件大小
-                        max_file_size = self.config.get("max_file_size", 100) * 1024 * 1024  # 转换为字节
+                        max_file_size_bytes = self.max_file_size * 1024 * 1024  # 转换为字节
                         file_size = os.path.getsize(file_path)
-                        if file_size > max_file_size:
-                            logger.warning(f"文件 {file_name} 大小超过限制 ({file_size / 1024 / 1024:.2f}MB > {max_file_size / 1024 / 1024}MB)")
-                            yield event.plain_result(f"文件 {file_name} 大小超过限制 ({file_size / 1024 / 1024:.2f}MB > {max_file_size / 1024 / 1024}MB)")
+                        if file_size > max_file_size_bytes:
+                            logger.warning(f"文件 {file_name} 大小超过限制 ({file_size / 1024 / 1024:.2f}MB > {self.max_file_size}MB)")
+                            yield event.plain_result(f"文件 {file_name} 大小超过限制 ({file_size / 1024 / 1024:.2f}MB > {self.max_file_size}MB)")
                             return
                         
                         # 获取完整文件名以确定正确的文件类型
                         completed_name = complete_filename(file_path)
                         # 检查文件类型是否支持
                         file_ext = os.path.splitext(completed_name)[1][1:].lower() if os.path.splitext(completed_name)[1] else ""
-                        supported_types = self.config.get("supported_file_types", list(SUPPORTED_EXTENSIONS.keys()))
-                        if file_ext and file_ext not in supported_types:
+                        if file_ext and file_ext not in self.supported_file_types:
                             logger.warning(f"不支持的文件类型: {file_ext}")
                             yield event.plain_result(f"不支持的文件类型: {file_ext}")
                             return
@@ -896,27 +933,58 @@ class AstrbotPluginFileReaderPro(Star):
                         if content and not is_error:
                             logger.info(f"读取文件{file_name}内容成功")
                             
-                            # 初始化嵌入和重排序提供者
-                            await self.initialize()
+                            # 检查模型是否可用，如果不可用尝试重新获取
+                            model_available = False
+                            max_retries = 2
+                            retry_count = 0
                             
-                            # 生成带时间戳的数据库名称
-                            timestamped_db_name = self._generate_timestamped_filename(file_name)
+                            while retry_count < max_retries:
+                                # 检查嵌入提供者是否可用
+                                if self.embedding_provider:
+                                    logger.info("嵌入提供者已初始化，跳过重新获取")
+                                    model_available = True
+                                    break
+                                else:
+                                    logger.warning(f"嵌入提供者不可用，尝试重新获取 (第{retry_count + 1}次)")
+                                    # 尝试重新初始化提供者
+                                    init_success = await self.initialize()
+                                    if init_success:
+                                        logger.info("重新获取模型成功")
+                                        model_available = True
+                                        break
+                                    else:
+                                        retry_count += 1
+                                        logger.error(f"重新获取模型失败，剩余重试次数: {max_retries - retry_count}")
                             
-                            # 获取或创建向量数据库（需要会话、对话ID和带时间戳的文件名）
-                            vec_db = await self.get_or_create_vector_db(self.current_session_id, self.current_conversation_id, timestamped_db_name)
-                            
-                            if vec_db:
-                                # 将文件内容分块
-                                chunks = await self.chunker.chunk(content)
-                                logger.info(f"文件分块完成，共{len(chunks)}个块")
+                            if model_available:
+                                # 生成带时间戳的数据库名称
+                                timestamped_db_name = self._generate_timestamped_filename(file_name)
                                 
-                                # 将块存入向量数据库
-                                metadatas = [{"file_name": file_name, "chunk_index": i} for i, _ in enumerate(chunks)]
-                                await vec_db.insert_batch(chunks, metadatas)
-                                logger.info(f"文件内容已存入向量数据库")
-                                logger.info(f"使用带时间戳的数据库名称：{timestamped_db_name}")
+                                # 获取或创建向量数据库（需要会话、对话ID和带时间戳的文件名）
+                                vec_db = await self.get_or_create_vector_db(self.current_session_id, self.current_conversation_id, timestamped_db_name)
+                                
+                                if vec_db:
+                                    # 将文件内容分块
+                                    chunks = await self.chunker.chunk(content)
+                                    logger.info(f"文件分块完成，共{len(chunks)}个块")
+                                    
+                                    # 将块存入向量数据库
+                                    metadatas = [{"file_name": file_name, "chunk_index": i} for i, _ in enumerate(chunks)]
+                                    await vec_db.insert_batch(chunks, metadatas)
+                                    logger.info(f"文件内容已存入向量数据库")
+                                    logger.info(f"使用带时间戳的数据库名称：{timestamped_db_name}")
 
-                                yield event.plain_result(f"文件：{file_name} 已处理完毕！请随时提问~ 😊")
+                                    # 成功向量化后，删除原始文件
+                                    try:
+                                        os.remove(file_path)
+                                        logger.info(f"文件 {file_name} 已成功向量化并删除原始文件")
+                                    except Exception as e:
+                                        logger.warning(f"删除原始文件 {file_name} 失败: {str(e)}")
+
+                                    yield event.plain_result(f"文件：{file_name} 已处理完毕！请随时提问~ 😊")
+                            else:
+                                logger.error(f"无法获取可用的嵌入提供者，无法处理文件 {file_name}")
+                                yield event.plain_result(f"文件处理失败：无法获取模型服务，请稍后重试或检查配置")
                         elif is_error:
                             logger.warning(f"读取文件{file_name}失败: {content}")
                             yield event.plain_result(content)  # 返回错误信息给用户
@@ -958,10 +1026,10 @@ class AstrbotPluginFileReaderPro(Star):
                 # 从请求中获取用户查询
                 user_query = req.prompt
                 
-                # 使用配置参数进行检索
-                retrieve_top_k = self.config.get("retrieve_top_k", 5)
-                fetch_k = self.config.get("fetch_k", 20)
-                enable_rerank = self.config.get("enable_rerank", True)
+                # 使用类属性进行检索
+                retrieve_top_k = self.retrieve_top_k
+                fetch_k = self.fetch_k
+                enable_rerank = self.enable_rerank
                 
                 # 检索相关内容
                 results = await vec_db.retrieve(user_query, k=retrieve_top_k, fetch_k=fetch_k, rerank=enable_rerank)
@@ -1001,7 +1069,17 @@ class AstrbotPluginFileReaderPro(Star):
     def __del__(self):
         """对象销毁时清理资源"""
         # 停止定期清理任务
-        asyncio.run(self._stop_periodic_cleanup())
+        if hasattr(self, '_cleanup_task') and self._cleanup_task:
+            self._cleanup_task.cancel()
+            logger.info("已取消定期清理任务")
         
-        # 清理资源
-        asyncio.run(self.cleanup())
+        # 清理资源 - 在__del__中避免使用异步操作，直接处理简单的资源释放
+        # 更复杂的清理应该在对象正常使用时通过调用cleanup()方法完成
+        for key, vec_db in list(self.vec_dbs.items()):
+            try:
+                # 尝试关闭向量数据库连接
+                if hasattr(vec_db, 'close'):
+                    vec_db.close()
+            except Exception as e:
+                logger.error(f"关闭向量数据库时出错: {str(e)}")
+        self.vec_dbs.clear()
