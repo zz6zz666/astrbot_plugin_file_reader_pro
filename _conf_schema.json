@@ -42,8 +42,8 @@
     "description": "控制文件内容的注入方式",
     "type": "string",
     "hint": "选择将文件内容注入到用户prompt中还是系统context中",
-    "options": ["user", "system"],
-    "default": "user"
+    "options": ["system", "user"],
+    "default": "system"
   },
   "system_context_keep_rounds": {
     "title": "检索内容上下文携带轮数",

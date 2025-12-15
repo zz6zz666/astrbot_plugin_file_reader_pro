@@ -343,7 +343,7 @@ def read_any_file_to_text(file_path: str) -> str:
         return f"读取文件时出错: {str(e)}"
 
 
-@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.2.0")
+@register("astrbot_plugin_file_reader_pro", "zz6zz666", "一个将文件内容高效传给llm的插件（增强版）", "2.4.0")
 class AstrbotPluginFileReaderPro(Star):
     PLUGIN_ID = "astrbot_plugin_file_reader_pro"
     
@@ -371,7 +371,7 @@ class AstrbotPluginFileReaderPro(Star):
         self.cleanup_interval = self.config.get("cleanup_interval", 15)  # 清理间隔（分钟）
         self.enable_group_file_processing = self.config.get("enable_group_file_processing", True)  # 是否启用群文件处理
         self.enabled_groups = self.config.get("enabled_groups", [])  # 启用的群列表
-        self.injection_type = self.config.get("injection_type", "user")  # 文件内容注入类型
+        self.injection_type = self.config.get("injection_type", "system")  # 文件内容注入类型
         self.system_context_keep_rounds = self.config.get("system_context_keep_rounds", 2)  # 系统上下文保留轮数
         
         # 初始化数据目录
@@ -648,6 +648,53 @@ class AstrbotPluginFileReaderPro(Star):
         
         return time_expired or rounds_expired
 
+    async def _cleanup_unauthorized_group_files(self):
+        """清理非启用群聊的文件数据库"""
+        try:
+            # 使用集合存储已经处理过的会话ID，避免重复清理
+            processed_sessions = set()
+            
+            # 直接遍历数据目录下的所有会话ID目录
+            if self._data_dir.exists():
+                for session_dir in self._data_dir.iterdir():
+                    if session_dir.is_dir():
+                        session_id = session_dir.name
+                        
+                        # 如果该会话已经处理过，跳过
+                        if session_id in processed_sessions:
+                            continue
+                        
+                        # 尝试从会话ID中提取群聊ID
+                        group_id = None
+                        
+                        # 检查是否为群聊会话（格式：适配器名称:GroupMessage:12345678）
+                        if "GroupMessage" in session_id:
+                            # 格式：适配器名称:GroupMessage:12345678
+                            try:
+                                parts = session_id.split(":")
+                                if len(parts) >= 3:
+                                    group_id = parts[2]
+                            except Exception:
+                                pass
+                        
+                        # 如果能够提取到群聊ID，认为是群聊会话
+                        if group_id:
+                            # 如果群聊文件处理被禁用，清理该群聊会话
+                            if not self.enable_group_file_processing:
+                                logger.info(f"群聊文件处理已禁用，清理群聊会话 {session_id} 的所有文件")
+                                await self.cleanup_all_session_files(session_id)
+                                processed_sessions.add(session_id)
+                                continue
+                            
+                            # 如果配置了群聊白名单，检查群聊ID是否在白名单中
+                            if self.enabled_groups:
+                                if str(group_id) not in [str(g) for g in self.enabled_groups]:
+                                    logger.info(f"群聊 {group_id} 不在白名单中，清理会话 {session_id} 的所有文件")
+                                    await self.cleanup_all_session_files(session_id)
+                                    processed_sessions.add(session_id)
+        except Exception as e:
+            logger.error(f"清理非启用群聊文件失败: {str(e)}")
+    
     async def initialize(self):
         """初始化嵌入提供者和重排序提供者"""
         try:
@@ -705,6 +752,9 @@ class AstrbotPluginFileReaderPro(Star):
                 logger.info(f"使用的重排序提供者: {self.rerank_provider.__class__.__name__}")
             else:
                 logger.warning("无法获取重排序提供者，将不使用重排序功能")
+            
+            # 清理非启用群聊的文件数据库
+            await self._cleanup_unauthorized_group_files()
             
             # 启动定期清理任务
             await self._start_periodic_cleanup()
@@ -983,7 +1033,7 @@ class AstrbotPluginFileReaderPro(Star):
                                     except Exception as e:
                                         logger.warning(f"删除原始文件 {file_name} 失败: {str(e)}")
 
-                                    yield event.plain_result(f"文件：{file_name} 已处理完毕！请随时提问~ 😊")
+                                    yield event.plain_result(f"文件：{file_name} 已预处理完毕！请随时提问~ 😊")
                             else:
                                 logger.error(f"无法获取可用的嵌入提供者，无法处理文件 {file_name}")
                                 yield event.plain_result(f"文件处理失败：无法获取模型服务，请稍后重试或检查配置")
